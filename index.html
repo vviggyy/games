@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Games</title>
+<meta name="description" content="Leaderboards for daily web games, among friends.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%F0%9F%8F%86</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container" id="container">
+  <div class="header">
+    <h1>Games</h1>
+    <div class="subtitle">Daily puzzles &middot; settled by leaderboard</div>
+  </div>
+
+  <nav class="nav" id="nav"></nav>
+
+  <div id="view">
+    <div class="empty">Loading&hellip;</div>
+  </div>
+
+  <div class="footer">
+    One score per person per game per day. Scores live in
+    <a href="https://github.com/vviggyy/games/blob/main/scores.csv">scores.csv</a> &mdash; every
+    submission is a commit.
+  </div>
+</div>
+
+<div class="modal-overlay" id="pwModal" style="display:none">
+  <div class="modal">
+    <h3 id="pwTitle">Admin required</h3>
+    <p id="pwBody">Enter the admin password.</p>
+    <input type="password" id="pwInput" placeholder="Password" autocomplete="off">
+    <div class="status err" id="pwError"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closePw()">Cancel</button>
+      <button class="btn" id="pwConfirm">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * Game registry. `id` is what lands in scores.csv; `route` is the
+ * hash fragment. `dir` says which direction is better, which drives
+ * both the per-game ranking and the orientation of the history chart.
+ * ------------------------------------------------------------------ */
+const GAMES = [
+  {
+    id: 'krillion',
+    route: 'krillion',
+    name: 'Krillion',
+    nav: 'Krillion',
+    tagline: 'Seven prompts, 25 seconds each. The rarer your answer, the deeper you dive.',
+    url: 'https://www.krillion.org/',
+    accent: '#0e7490',
+    dir: 'high',
+    min: 0, max: 700, step: 1,
+    input: 'number',
+    inputLabel: 'Score',
+    inputHint: '0–700 · seven rounds, 10–100 points each',
+    placeholder: '385',
+    fmtRaw: v => fmtNum(v),
+    fmtAvg: v => v.toFixed(1),
+    readout: v => `${(v * 10).toLocaleString()} m deep`,
+  },
+  {
+    id: 'wordle',
+    route: 'wordle',
+    name: 'Wordle',
+    nav: 'Wordle',
+    tagline: 'Five letters, six guesses. Fewer guesses is better; a miss counts as 7.',
+    url: 'https://www.nytimes.com/games/wordle/index.html',
+    accent: '#4f8f46',
+    dir: 'low',
+    min: 1, max: 7, step: 1,
+    input: 'attempts',
+    inputLabel: 'Guesses used',
+    inputHint: 'Tap how many guesses it took, or X if you never got it',
+    fmtRaw: v => (v >= 7 ? 'X/6' : `${fmtNum(v)}/6`),
+    fmtAvg: v => v.toFixed(2),
+    readout: v => (v >= 7 ? 'did not solve — counts as 7' : `solved in ${fmtNum(v)}`),
+  },
+  {
+    id: 'dialed_color',
+    route: 'dialed-color',
+    name: 'dialed.gg color',
+    nav: 'Color',
+    tagline: 'Five colors from memory, scored on perceptual distance. 50 is perfect recall.',
+    url: 'https://dialed.gg/color',
+    accent: '#c04a73',
+    dir: 'high',
+    min: 0, max: 50, step: 0.1,
+    input: 'number',
+    inputLabel: 'Score',
+    inputHint: '0–50 · five rounds, up to 10 each · decimals fine',
+    placeholder: '41.8',
+    fmtRaw: v => `${fmtNum(v)}/50`,
+    fmtAvg: v => v.toFixed(1),
+    readout: v => `${Math.round((v / 50) * 100)}% of perfect`,
+  },
+  {
+    id: 'dialed_sound',
+    route: 'dialed-sound',
+    name: 'dialed.gg sound',
+    nav: 'Sound',
+    tagline: 'Five tones matched by ear, scored on the ERB scale. 50 is perfect pitch.',
+    url: 'https://dialed.gg/sound',
+    accent: '#6d53c9',
+    dir: 'high',
+    min: 0, max: 50, step: 0.1,
+    input: 'number',
+    inputLabel: 'Score',
+    inputHint: '0–50 · five rounds, up to 10 each · decimals fine',
+    placeholder: '37.4',
+    fmtRaw: v => `${fmtNum(v)}/50`,
+    fmtAvg: v => v.toFixed(1),
+    readout: v => `${Math.round((v / 50) * 100)}% of perfect`,
+  },
+];
+
+const STATE = { scores: [], suggestions: [], loaded: false, error: null };
+const LS_NAME = 'games.lastPlayer';
+
+/* ---------------------------- utilities ---------------------------- */
+
+function gameByRoute(route) { return GAMES.find(g => g.route === route); }
+function gameById(id) { return GAMES.find(g => g.id === id); }
+
+function fmtNum(v) {
+  return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function todayISO() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function prettyDate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function relTime(iso) {
+  const then = new Date(iso).getTime();
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/* Minimal RFC-4180 CSV parser — the Python writer quotes names when needed. */
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = '';
+    } else if (c !== '\r') {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* ---------------------------- data load ---------------------------- */
+
+async function loadData() {
+  const bust = `?t=${Date.now()}`;
+  const [csvRes, sugRes] = await Promise.all([
+    fetch('scores.csv' + bust).catch(() => null),
+    fetch('suggestions.json' + bust).catch(() => null),
+  ]);
+
+  STATE.scores = [];
+  if (csvRes && csvRes.ok) {
+    const rows = parseCSV(await csvRes.text());
+    if (rows.length) {
+      const head = rows[0].map(h => h.trim());
+      const iDate = head.indexOf('date'), iGame = head.indexOf('game');
+      const iPlayer = head.indexOf('player'), iScore = head.indexOf('score');
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row || row.length < 4) continue;
+        const score = parseFloat(row[iScore]);
+        const game = row[iGame];
+        if (!row[iDate] || !row[iPlayer] || Number.isNaN(score)) continue;
+        if (!gameById(game)) continue; // ignore retired games (e.g. chainle)
+        STATE.scores.push({ date: row[iDate], game, player: row[iPlayer], score });
+      }
+    }
+  }
+
+  STATE.suggestions = [];
+  if (sugRes && sugRes.ok) {
+    try {
+      const j = await sugRes.json();
+      if (Array.isArray(j)) STATE.suggestions = j;
+    } catch (e) { /* leave empty */ }
+  }
+
+  STATE.loaded = true;
+}
+
+function allPlayers() {
+  return [...new Set(STATE.scores.map(r => r.player))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+/* --------------------------- ranking math -------------------------- */
+
+/* Per-game stats, ranked by average score. Ties share a rank and the
+   next rank skips (1, 2, 2, 4). */
+function statsFor(id) {
+  const g = gameById(id);
+  const isBetter = (a, b) => (g.dir === 'high' ? a > b : a < b);
+  const byPlayer = new Map();
+
+  for (const r of STATE.scores) {
+    if (r.game !== id) continue;
+    let s = byPlayer.get(r.player);
+    if (!s) { s = { player: r.player, entries: [], sum: 0 }; byPlayer.set(r.player, s); }
+    s.entries.push(r);
+    s.sum += r.score;
+  }
+
+  const out = [...byPlayer.values()].map(s => {
+    s.n = s.entries.length;
+    s.avg = s.sum / s.n;
+    s.best = s.entries.reduce((m, e) => (m === null || isBetter(e.score, m) ? e.score : m), null);
+    s.entries.sort((a, b) => a.date.localeCompare(b.date));
+    s.last = s.entries[s.entries.length - 1];
+    return s;
+  });
+
+  out.sort((a, b) => (g.dir === 'high' ? b.avg - a.avg : a.avg - b.avg)
+    || b.n - a.n
+    || a.player.localeCompare(b.player));
+
+  let rank = 0, prev = null;
+  out.forEach((s, i) => {
+    if (prev === null || s.avg !== prev) rank = i + 1;
+    s.rank = rank;
+    prev = s.avg;
+  });
+  return out;
+}
+
+/* Global board: sum of per-game ranks, lower is better. A player who
+   never logged a game is placed one below that game's last place. */
+function globalBoard() {
+  const perGame = new Map();
+  for (const g of GAMES) {
+    const stats = statsFor(g.id);
+    perGame.set(g.id, {
+      stats,
+      ranks: new Map(stats.map(s => [s.player, s.rank])),
+      count: stats.length,
+    });
+  }
+
+  const rows = allPlayers().map(player => {
+    const cells = GAMES.map(g => {
+      const info = perGame.get(g.id);
+      const r = info.ranks.get(player);
+      return r !== undefined
+        ? { rank: r, played: true }
+        : { rank: info.count + 1, played: false };
+    });
+    return {
+      player,
+      cells,
+      total: cells.reduce((a, c) => a + c.rank, 0),
+      played: cells.filter(c => c.played).length,
+    };
+  });
+
+  rows.sort((a, b) => a.total - b.total
+    || b.played - a.played
+    || a.player.localeCompare(b.player));
+
+  let rank = 0, prev = null;
+  rows.forEach((r, i) => {
+    if (prev === null || r.total !== prev) rank = i + 1;
+    r.rank = rank;
+    prev = r.total;
+  });
+
+  return { rows, perGame };
+}
+
+/* ------------------------------ chrome ----------------------------- */
+
+function renderNav(activeRoute) {
+  const items = [{ route: '', label: 'Global', accent: 'var(--accent)' }]
+    .concat(GAMES.map(g => ({ route: g.route, label: g.nav, accent: g.accent })))
+    .concat([{ route: 'suggestions', label: 'Suggestions', accent: 'var(--accent)' }]);
+
+  document.getElementById('nav').innerHTML = items.map(it => {
+    const active = it.route === activeRoute;
+    return `<a href="#/${it.route}" class="${active ? 'active' : ''}"
+      style="--nav-accent:${it.accent}">${escapeHtml(it.label)}</a>`;
+  }).join('');
+}
+
+function setAccent(color) {
+  const c = document.getElementById('container');
+  if (color) {
+    c.style.setProperty('--accent', color);
+    c.style.setProperty('--accent-soft', hexToSoft(color));
+  } else {
+    c.style.removeProperty('--accent');
+    c.style.removeProperty('--accent-soft');
+  }
+}
+
+function hexToSoft(hex) {
+  const m = hex.replace('#', '');
+  const n = parseInt(m.length === 3 ? m.split('').map(c => c + c).join('') : m, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, 0.11)`;
+}
+
+/* ------------------------------ views ------------------------------ */
+
+function renderHome() {
+  setAccent(null);
+  renderNav('');
+  const { rows, perGame } = globalBoard();
+
+  let h = `<h2>Global leaderboard
+    <span class="hint">sum of your rank in each game &middot; lower is better</span></h2>`;
+
+  if (!rows.length) {
+    h += `<div class="card"><div class="empty">
+      No scores logged yet.<br>Pick a game below and be the first.
+    </div></div>`;
+  } else {
+    h += `<div class="card flush"><table>
+      <thead><tr>
+        <th>#</th><th class="left">Player</th>
+        ${GAMES.map(g => `<th title="${escapeHtml(g.name)}">${escapeHtml(g.nav)}</th>`).join('')}
+        <th>Total</th>
+      </tr></thead><tbody>`;
+    for (const r of rows) {
+      h += `<tr class="top-${r.rank}">
+        <td class="rank">${r.rank}</td>
+        <td class="player left">${escapeHtml(r.player)}</td>
+        ${r.cells.map(c => `<td><span class="pill ${c.played ? '' : 'absent'}"
+          title="${c.played ? 'rank ' + c.rank : 'no scores logged — last place + 1'}"
+          >${c.rank}</span></td>`).join('')}
+        <td class="score">${r.total}</td>
+      </tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+
+  h += `<h2>Games</h2><div class="game-grid">`;
+  for (const g of GAMES) {
+    const info = perGame.get(g.id);
+    const n = info.stats.length;
+    const leader = n ? info.stats[0] : null;
+    const meta = leader
+      ? `★ ${escapeHtml(leader.player)} · ${g.fmtAvg(leader.avg)}`
+      : 'no scores yet';
+    h += `<a class="game-tile" href="#/${g.route}" style="--tile-accent:${g.accent}">
+      <div class="tile-name">${escapeHtml(g.name)}</div>
+      <div class="tile-tag">${escapeHtml(g.tagline)}</div>
+      <div class="tile-meta">${meta}</div>
+    </a>`;
+  }
+  h += `</div>`;
+
+  document.getElementById('view').innerHTML = h;
+}
+
+function renderGame(g) {
+  setAccent(g.accent);
+  renderNav(g.route);
+  const stats = statsFor(g.id);
+  const players = allPlayers();
+  const entries = STATE.scores.filter(r => r.game === g.id);
+  const leader = stats[0];
+
+  let h = `<div class="game-head">
+    <div>
+      <h1>${escapeHtml(g.name)}</h1>
+      <div class="tag">${escapeHtml(g.tagline)}</div>
+    </div>
+    <a class="play" href="${g.url}" target="_blank" rel="noopener">Play</a>
+  </div>`;
+
+  h += `<div class="stat-row">
+    <div class="stat"><div class="v">${stats.length}</div><div class="k">Players</div></div>
+    <div class="stat"><div class="v">${entries.length}</div><div class="k">Scores</div></div>
+    <div class="stat"><div class="v">${leader ? g.fmtAvg(leader.avg) : '—'}</div>
+      <div class="k">Best avg</div></div>
+  </div>`;
+
+  h += `<button class="btn" id="logToggle">Log a score</button>
+    <div class="card form" id="logForm">
+      <div class="field">
+        <label for="fPlayer">Player</label>
+        ${playerSelect('fPlayer', players)}
+      </div>
+      <div class="field" id="newNameField" style="display:none">
+        <label for="fNewName">New player name</label>
+        <input type="text" id="fNewName" maxlength="24" placeholder="Their name">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="fDate">Date</label>
+          <input type="date" id="fDate" value="${todayISO()}" max="${todayISO()}">
+        </div>
+        ${g.input === 'number' ? `
+        <div class="field">
+          <label for="fScore">${escapeHtml(g.inputLabel)}</label>
+          <input type="number" id="fScore" min="${g.min}" max="${g.max}"
+            step="${g.step}" placeholder="${g.placeholder || ''}">
+        </div>` : ''}
+      </div>
+      ${g.input === 'attempts' ? `
+      <div class="field">
+        <label for="fScore">${escapeHtml(g.inputLabel)}
+          <span class="label-hint">— ${escapeHtml(g.inputHint)}</span></label>
+        <div class="attempts" id="fAttempts">
+          ${[1, 2, 3, 4, 5, 6].map(n =>
+            `<button type="button" data-v="${n}">${n}</button>`).join('')}
+          <button type="button" class="fail" data-v="7">X</button>
+        </div>
+        <input type="hidden" id="fScore">
+      </div>` : `
+      <div class="field" style="margin-top:-0.4rem">
+        <span class="label-hint" style="font-size:0.7rem">${escapeHtml(g.inputHint)}</span>
+      </div>`}
+      <div class="readout" id="fReadout"></div>
+      <button class="btn btn-sub" id="fSubmit" style="margin-top:0.6rem">Submit</button>
+      <div class="status" id="fStatus"></div>
+    </div>`;
+
+  h += `<h2>Leaderboard <span class="hint">ranked by average score</span></h2>`;
+  if (!stats.length) {
+    h += `<div class="card"><div class="empty">
+      Nobody has logged a ${escapeHtml(g.name)} score yet.
+    </div></div>`;
+  } else {
+    h += `<div class="card flush"><table>
+      <thead><tr>
+        <th>#</th><th class="left">Player</th>
+        <th>Avg</th><th>Best</th><th>Days</th>
+      </tr></thead><tbody>`;
+    for (const s of stats) {
+      h += `<tr class="top-${s.rank}">
+        <td class="rank">${s.rank}</td>
+        <td class="player left">${escapeHtml(s.player)}</td>
+        <td class="score">${g.fmtAvg(s.avg)}</td>
+        <td class="dim">${g.fmtRaw(s.best)}</td>
+        <td class="dim">${s.n}</td>
+      </tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+
+  h += `<h2>Player history</h2>`;
+  if (!stats.length) {
+    h += `<div class="card"><div class="empty">Nothing to show yet.</div></div>`;
+  } else {
+    const saved = localStorage.getItem(LS_NAME);
+    const preset = stats.some(s => s.player === saved) ? saved : stats[0].player;
+    h += `<div class="card">
+      <div class="field" style="margin-bottom:1rem">
+        <label for="hPlayer">Show history for</label>
+        <select id="hPlayer">
+          ${stats.map(s => `<option value="${escapeHtml(s.player)}"
+            ${s.player === preset ? 'selected' : ''}>${escapeHtml(s.player)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="historyBody"></div>
+    </div>`;
+  }
+
+  document.getElementById('view').innerHTML = h;
+  wireGameForm(g, players);
+}
+
+function playerSelect(id, players) {
+  const saved = localStorage.getItem(LS_NAME);
+  const opts = players.map(p =>
+    `<option value="${escapeHtml(p)}" ${p === saved ? 'selected' : ''}>${escapeHtml(p)}</option>`
+  ).join('');
+  return `<select id="${id}">
+    ${players.length ? '' : '<option value="">— no players yet —</option>'}
+    ${opts}
+    <option value="__new__">+ New player…</option>
+  </select>`;
+}
+
+function wireGameForm(g, players) {
+  const form = document.getElementById('logForm');
+  const toggle = document.getElementById('logToggle');
+  toggle.onclick = () => {
+    form.classList.toggle('open');
+    toggle.textContent = form.classList.contains('open') ? 'Cancel' : 'Log a score';
+  };
+
+  const sel = document.getElementById('fPlayer');
+  const newField = document.getElementById('newNameField');
+  const syncNew = () => {
+    const isNew = sel.value === '__new__' || sel.value === '';
+    newField.style.display = isNew ? '' : 'none';
+    if (isNew) document.getElementById('fNewName').focus();
+  };
+  sel.onchange = syncNew;
+  // Only force the new-name field when nobody exists anywhere — a game with
+  // no scores yet should still offer players known from the other games.
+  if (!players.length) { sel.value = '__new__'; syncNew(); }
+
+  const scoreEl = document.getElementById('fScore');
+  const readout = document.getElementById('fReadout');
+  const showReadout = () => {
+    const v = parseFloat(scoreEl.value);
+    readout.textContent = Number.isNaN(v) ? '' : (g.readout ? g.readout(v) : '');
+  };
+
+  if (g.input === 'attempts') {
+    const box = document.getElementById('fAttempts');
+    box.querySelectorAll('button').forEach(b => {
+      b.onclick = () => {
+        box.querySelectorAll('button').forEach(x => x.classList.remove('sel'));
+        b.classList.add('sel');
+        scoreEl.value = b.dataset.v;
+        showReadout();
+      };
+    });
+  } else {
+    scoreEl.oninput = showReadout;
+  }
+
+  document.getElementById('fSubmit').onclick = () => submitScore(g);
+
+  const hSel = document.getElementById('hPlayer');
+  if (hSel) {
+    const draw = () => renderHistory(g, hSel.value);
+    hSel.onchange = draw;
+    draw();
+  }
+}
+
+function renderHistory(g, player) {
+  const entries = STATE.scores
+    .filter(r => r.game === g.id && r.player === player)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const body = document.getElementById('historyBody');
+  if (!entries.length) {
+    body.innerHTML = `<div class="empty">No scores for ${escapeHtml(player)}.</div>`;
+    return;
+  }
+
+  const isBetter = (a, b) => (g.dir === 'high' ? a > b : a < b);
+  const vals = entries.map(e => e.score);
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const best = vals.reduce((m, v) => (isBetter(v, m) ? v : m), vals[0]);
+
+  let h = `<div class="stat-row">
+    <div class="stat"><div class="v">${g.fmtAvg(avg)}</div><div class="k">Average</div></div>
+    <div class="stat"><div class="v">${g.fmtRaw(best)}</div><div class="k">Best</div></div>
+    <div class="stat"><div class="v">${entries.length}</div><div class="k">Days</div></div>
+  </div>`;
+
+  h += sparkline(g, entries);
+  h += `<div class="spark-axis">
+    <span>${prettyDate(entries[0].date)}</span>
+    <span>better is taller</span>
+    <span>${prettyDate(entries[entries.length - 1].date)}</span>
+  </div>`;
+
+  h += `<table><thead><tr>
+      <th class="left">Date</th><th>Score</th><th>vs. avg</th>
+    </tr></thead><tbody>`;
+  for (const e of [...entries].reverse()) {
+    const diff = e.score - avg;
+    const good = g.dir === 'high' ? diff > 0 : diff < 0;
+    const sign = diff > 0 ? '+' : '';
+    const col = Math.abs(diff) < 0.005 ? 'var(--faint)' : (good ? 'var(--good)' : 'var(--bad)');
+    h += `<tr>
+      <td class="left dim">${escapeHtml(e.date)}</td>
+      <td class="score">${g.fmtRaw(e.score)}<button class="btn-x"
+        title="Delete this score"
+        onclick="promptDelete('${escapeHtml(e.date)}','${g.id}','${escapeHtml(e.player)}')"
+        >&times;</button></td>
+      <td style="color:${col}">${Math.abs(diff) < 0.005 ? '—' : sign + diff.toFixed(1)}</td>
+    </tr>`;
+  }
+  h += `</tbody></table>`;
+  body.innerHTML = h;
+}
+
+/* Bars, not a line: "taller is better" holds for both directions once
+   low-is-better games are inverted. */
+function sparkline(g, entries) {
+  const W = 600, H = 90, pad = 4;
+  const n = entries.length;
+  const slot = W / n;
+  const bw = Math.max(2, Math.min(34, slot * 0.62));
+  const span = g.max - g.min || 1;
+
+  const bars = entries.map((e, i) => {
+    let norm = (e.score - g.min) / span;
+    if (g.dir === 'low') norm = 1 - norm;
+    norm = Math.max(0, Math.min(1, norm));
+    const bh = Math.max(2, norm * (H - pad * 2));
+    const x = i * slot + (slot - bw) / 2;
+    const y = H - pad - bh;
+    return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}"
+      height="${bh.toFixed(2)}" rx="2" fill="${g.accent}" opacity="${0.45 + norm * 0.55}"
+      ><title>${escapeHtml(e.date)}: ${escapeHtml(g.fmtRaw(e.score))}</title></rect>`;
+  }).join('');
+
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+    role="img" aria-label="Score history">
+    <line x1="0" y1="${H - pad}" x2="${W}" y2="${H - pad}"
+      stroke="rgba(35,33,46,0.12)" stroke-width="1"/>
+    ${bars}
+  </svg>`;
+}
+
+function renderSuggestions() {
+  setAccent(null);
+  renderNav('suggestions');
+  const players = allPlayers();
+  const list = [...STATE.suggestions].sort((a, b) =>
+    String(b.ts || '').localeCompare(String(a.ts || '')));
+
+  let h = `<h2>Suggestion box
+    <span class="hint">another game to track, a rule to change, a complaint</span></h2>`;
+
+  h += `<div class="card">
+    <div class="field">
+      <label for="sName">Who are you? <span class="label-hint">— optional</span></label>
+      <select id="sName">
+        <option value="">Anonymous</option>
+        ${players.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('')}
+        <option value="__new__">+ Someone else…</option>
+      </select>
+    </div>
+    <div class="field" id="sNewField" style="display:none">
+      <label for="sNewName">Name</label>
+      <input type="text" id="sNewName" maxlength="24" placeholder="Your name">
+    </div>
+    <div class="field">
+      <label for="sText">Suggestion</label>
+      <textarea id="sText" rows="3" maxlength="500"
+        placeholder="We should track Connections next&hellip;"></textarea>
+    </div>
+    <button class="btn btn-sub" id="sSubmit">Post</button>
+    <div class="status" id="sStatus"></div>
+  </div>`;
+
+  h += `<h2>${list.length} posted</h2>`;
+  if (!list.length) {
+    h += `<div class="card"><div class="empty">Nothing yet. Go first.</div></div>`;
+  } else {
+    h += `<div class="card">` + list.map(s => `
+      <div class="suggestion">
+        <div class="s-head">
+          <span class="s-name">${escapeHtml(s.name || 'Anonymous')}</span>
+          <span class="s-time">${escapeHtml(relTime(s.ts))}</span>
+          <button class="btn-x" title="Delete"
+            onclick="promptDeleteSuggestion('${escapeHtml(s.id)}')">&times;</button>
+        </div>
+        <div class="s-text">${escapeHtml(s.text)}</div>
+      </div>`).join('') + `</div>`;
+  }
+
+  document.getElementById('view').innerHTML = h;
+
+  const sel = document.getElementById('sName');
+  sel.onchange = () => {
+    document.getElementById('sNewField').style.display =
+      sel.value === '__new__' ? '' : 'none';
+  };
+  document.getElementById('sSubmit').onclick = submitSuggestion;
+}
+
+/* ------------------------------ writes ----------------------------- */
+
+async function submitScore(g) {
+  const statusEl = document.getElementById('fStatus');
+  const btn = document.getElementById('fSubmit');
+  const sel = document.getElementById('fPlayer');
+  const player = (sel.value === '__new__' || sel.value === '')
+    ? document.getElementById('fNewName').value.trim()
+    : sel.value;
+  const date = document.getElementById('fDate').value;
+  const raw = document.getElementById('fScore').value;
+  const score = parseFloat(raw);
+
+  const fail = msg => { statusEl.className = 'status err'; statusEl.textContent = msg; };
+
+  if (!player) return fail('Pick a player or type a new name.');
+  if (!date) return fail('Pick a date.');
+  if (raw === '' || Number.isNaN(score)) {
+    return fail(g.input === 'attempts' ? 'Tap how many guesses it took.' : 'Enter a score.');
+  }
+  if (score < g.min || score > g.max) {
+    return fail(`Score must be between ${g.min} and ${g.max}.`);
+  }
+
+  btn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = 'Saving…';
+
+  try {
+    const res = await fetch('/api/add-score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, game: g.id, player, score }),
+    });
+    const out = await res.json();
+    if (!res.ok || !out.ok) throw new Error(out.error || `HTTP ${res.status}`);
+
+    localStorage.setItem(LS_NAME, out.player || player);
+    statusEl.className = 'status ok';
+    statusEl.textContent = out.updated
+      ? `Updated ${out.player}’s score for ${date}.`
+      : `Logged ${out.player} — ${g.fmtRaw(score)} on ${date}.`;
+    await loadData();
+    setTimeout(() => route(), 700);
+  } catch (e) {
+    fail(e.message || 'Something went wrong.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function submitSuggestion() {
+  const statusEl = document.getElementById('sStatus');
+  const btn = document.getElementById('sSubmit');
+  const sel = document.getElementById('sName');
+  const name = sel.value === '__new__'
+    ? document.getElementById('sNewName').value.trim()
+    : sel.value;
+  const text = document.getElementById('sText').value.trim();
+
+  if (!text) {
+    statusEl.className = 'status err';
+    statusEl.textContent = 'Write something first.';
+    return;
+  }
+
+  btn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = 'Posting…';
+
+  try {
+    const res = await fetch('/api/suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'add', name, text }),
+    });
+    const out = await res.json();
+    if (!res.ok || !out.ok) throw new Error(out.error || `HTTP ${res.status}`);
+    await loadData();
+    route();
+  } catch (e) {
+    statusEl.className = 'status err';
+    statusEl.textContent = e.message || 'Something went wrong.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ------------------------- admin-gated deletes --------------------- */
+
+let _pwAction = null;
+
+function openPw(title, body, onConfirm) {
+  document.getElementById('pwTitle').textContent = title;
+  document.getElementById('pwBody').textContent = body;
+  document.getElementById('pwError').textContent = '';
+  const input = document.getElementById('pwInput');
+  input.value = '';
+  document.getElementById('pwModal').style.display = '';
+  input.focus();
+  _pwAction = onConfirm;
+}
+
+function closePw() {
+  document.getElementById('pwModal').style.display = 'none';
+  _pwAction = null;
+}
+
+document.getElementById('pwConfirm').onclick = async () => {
+  if (!_pwAction) return;
+  const pw = document.getElementById('pwInput').value;
+  const errEl = document.getElementById('pwError');
+  if (!pw) { errEl.textContent = 'Enter the password.'; return; }
+  errEl.textContent = 'Working…';
+  try {
+    await _pwAction(pw);
+    closePw();
+    await loadData();
+    route();
+  } catch (e) {
+    errEl.textContent = e.message || 'Failed.';
+  }
+};
+
+document.getElementById('pwInput').onkeydown = e => {
+  if (e.key === 'Enter') document.getElementById('pwConfirm').click();
+};
+
+function promptDelete(date, game, player) {
+  const g = gameById(game);
+  openPw('Delete score',
+    `${player} · ${g.name} · ${date}. This removes the row from scores.csv.`,
+    async pw => {
+      const res = await fetch('/api/delete-score', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, game, player, password: pw }),
+      });
+      const out = await res.json();
+      if (!res.ok || !out.ok) throw new Error(out.error || `HTTP ${res.status}`);
+    });
+}
+
+function promptDeleteSuggestion(id) {
+  openPw('Delete suggestion', 'This removes it from suggestions.json.', async pw => {
+    const res = await fetch('/api/suggest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete', id, password: pw }),
+    });
+    const out = await res.json();
+    if (!res.ok || !out.ok) throw new Error(out.error || `HTTP ${res.status}`);
+  });
+}
+
+/* ------------------------------ router ----------------------------- */
+
+function route() {
+  const frag = (location.hash || '#/').replace(/^#\/?/, '');
+  if (frag === 'suggestions') return renderSuggestions();
+  const g = gameByRoute(frag);
+  if (g) return renderGame(g);
+  return renderHome();
+}
+
+window.addEventListener('hashchange', () => {
+  window.scrollTo(0, 0);
+  route();
+});
+
+(async () => {
+  await loadData();
+  route();
+})();
+</script>
+</body>
+</html>
