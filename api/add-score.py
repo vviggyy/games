@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler
 REPO = "vviggyy/games"
 CSV_PATH = "scores.csv"
 BRANCH = "main"
-HEADER = ["date", "game", "player", "score"]
+HEADER = ["date", "game", "player", "score", "percentile"]
 
 # Valid score range per game, mirroring the GAMES config in index.html.
 GAME_RANGES = {
@@ -20,6 +20,9 @@ GAME_RANGES = {
     "dialed_color": (0, 50),
     "dialed_sound": (0, 50),
 }
+
+# Games that also record where the score landed against everyone else.
+PERCENTILE_GAMES = {"krillion"}
 
 MAX_NAME_LEN = 24
 
@@ -101,6 +104,24 @@ class handler(BaseHTTPRequestHandler):
             self._json(400, {"error": f"Score for {game} must be between {lo} and {hi}"})
             return
 
+        # Percentile is optional. A blank one on an update leaves whatever is
+        # already stored alone, so fixing a score does not wipe it.
+        raw_pct = payload.get("percentile")
+        pct_str = None
+        if raw_pct not in (None, ""):
+            if game not in PERCENTILE_GAMES:
+                self._json(400, {"error": f"{game} does not record a percentile"})
+                return
+            try:
+                pct = float(raw_pct)
+            except (TypeError, ValueError):
+                self._json(400, {"error": "Percentile must be a number"})
+                return
+            if not (0 <= pct <= 100):
+                self._json(400, {"error": "Percentile must be between 0 and 100"})
+                return
+            pct_str = str(int(pct)) if pct == int(pct) else f"{pct:g}"
+
         # Store integers without a trailing .0 so the CSV stays readable.
         score_str = str(int(score)) if score == int(score) else f"{score:g}"
 
@@ -122,15 +143,20 @@ class handler(BaseHTTPRequestHandler):
         for r in rows:
             if r["date"] == date and r["game"] == game and r["player"] == player:
                 r["score"] = score_str
+                if pct_str is not None:
+                    r["percentile"] = pct_str
                 replaced = True
                 break
         if not replaced:
-            rows.append({"date": date, "game": game, "player": player, "score": score_str})
+            rows.append({
+                "date": date, "game": game, "player": player,
+                "score": score_str, "percentile": pct_str or "",
+            })
 
         rows.sort(key=lambda r: (r["date"], r["game"], r["player"].lower()))
 
         buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=HEADER, lineterminator="\n")
+        writer = csv.DictWriter(buf, fieldnames=HEADER, lineterminator="\n", restval="")
         writer.writeheader()
         writer.writerows(rows)
         updated_csv = buf.getvalue()
@@ -160,6 +186,7 @@ class handler(BaseHTTPRequestHandler):
             "game": game,
             "player": player,
             "score": score_str,
+            "percentile": pct_str,
         })
 
     def _json(self, status, data):

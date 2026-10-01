@@ -65,6 +65,12 @@ const GAMES = [
     fmtRaw: v => fmtNum(v),
     fmtAvg: v => v.toFixed(1),
     readout: v => `${(v * 10).toLocaleString()} m deep`,
+    // Raw score is not comparable across days — some days are simply harder.
+    // Percentile is already normalised against that day's field, so it ranks
+    // and the score rides along as a displayed stat and the tiebreak.
+    percentile: true,
+    percentileRequired: true,
+    rankBy: 'percentile',
   },
   {
     id: 'wordle',
@@ -144,6 +150,13 @@ function todayISO() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+function ordinal(n) {
+  const r = Math.round(n);
+  const v = r % 100;
+  if (v >= 11 && v <= 13) return `${r}th`;
+  return r + (['th', 'st', 'nd', 'rd'][r % 10] || 'th');
+}
+
 function prettyDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   const dt = new Date(y, m - 1, d);
@@ -203,6 +216,7 @@ async function loadData() {
       const head = rows[0].map(h => h.trim());
       const iDate = head.indexOf('date'), iGame = head.indexOf('game');
       const iPlayer = head.indexOf('player'), iScore = head.indexOf('score');
+      const iPct = head.indexOf('percentile'); // absent in pre-percentile CSVs
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
         if (!row || row.length < 4) continue;
@@ -210,7 +224,12 @@ async function loadData() {
         const game = row[iGame];
         if (!row[iDate] || !row[iPlayer] || Number.isNaN(score)) continue;
         if (!gameById(game)) continue; // ignore retired games (e.g. chainle)
-        STATE.scores.push({ date: row[iDate], game, player: row[iPlayer], score });
+        const rawPct = iPct >= 0 ? row[iPct] : '';
+        const pct = rawPct === '' || rawPct === undefined ? null : parseFloat(rawPct);
+        STATE.scores.push({
+          date: row[iDate], game, player: row[iPlayer], score,
+          pct: pct === null || Number.isNaN(pct) ? null : pct,
+        });
       }
     }
   }
@@ -233,8 +252,12 @@ function allPlayers() {
 
 /* --------------------------- ranking math -------------------------- */
 
-/* Per-game stats, ranked by average score. Ties share a rank and the
-   next rank skips (1, 2, 2, 4). */
+/* Per-game stats. Ties share a rank and the next rank skips (1, 2, 2, 4).
+   Most games rank on average score; a game carrying `rankBy: 'percentile'`
+   ranks on average percentile instead, because raw score is not comparable
+   across days of differing difficulty. Players with no percentile at all are
+   returned with rank === null rather than being ranked on a different basis
+   from everyone else. */
 function statsFor(id) {
   const g = gameById(id);
   const isBetter = (a, b) => (g.dir === 'high' ? a > b : a < b);
@@ -243,31 +266,53 @@ function statsFor(id) {
   for (const r of STATE.scores) {
     if (r.game !== id) continue;
     let s = byPlayer.get(r.player);
-    if (!s) { s = { player: r.player, entries: [], sum: 0 }; byPlayer.set(r.player, s); }
+    if (!s) {
+      s = { player: r.player, entries: [], sum: 0, pctSum: 0, pctN: 0 };
+      byPlayer.set(r.player, s);
+    }
     s.entries.push(r);
     s.sum += r.score;
+    if (r.pct !== null && r.pct !== undefined) { s.pctSum += r.pct; s.pctN++; }
   }
 
-  const out = [...byPlayer.values()].map(s => {
+  const all = [...byPlayer.values()].map(s => {
     s.n = s.entries.length;
     s.avg = s.sum / s.n;
+    s.avgPct = s.pctN ? s.pctSum / s.pctN : null;
     s.best = s.entries.reduce((m, e) => (m === null || isBetter(e.score, m) ? e.score : m), null);
+    s.bestPct = s.entries.reduce((m, e) =>
+      (e.pct === null || e.pct === undefined ? m : (m === null || e.pct > m ? e.pct : m)), null);
     s.entries.sort((a, b) => a.date.localeCompare(b.date));
     s.last = s.entries[s.entries.length - 1];
     return s;
   });
 
-  out.sort((a, b) => (g.dir === 'high' ? b.avg - a.avg : a.avg - b.avg)
-    || b.n - a.n
-    || a.player.localeCompare(b.player));
+  const byScore = (a, b) => (g.dir === 'high' ? b.avg - a.avg : a.avg - b.avg);
+  const assignRanks = (list, metric) => {
+    let rank = 0, prev = null;
+    list.forEach((s, i) => {
+      const v = metric(s);
+      if (prev === null || v !== prev) rank = i + 1;
+      s.rank = rank;
+      prev = v;
+    });
+  };
 
-  let rank = 0, prev = null;
-  out.forEach((s, i) => {
-    if (prev === null || s.avg !== prev) rank = i + 1;
-    s.rank = rank;
-    prev = s.avg;
-  });
-  return out;
+  if (g.rankBy === 'percentile') {
+    const ranked = all.filter(s => s.avgPct !== null);
+    const unranked = all.filter(s => s.avgPct === null);
+    // Higher percentile is better; average score breaks ties.
+    ranked.sort((a, b) => b.avgPct - a.avgPct || byScore(a, b)
+      || b.n - a.n || a.player.localeCompare(b.player));
+    unranked.sort((a, b) => byScore(a, b) || a.player.localeCompare(b.player));
+    assignRanks(ranked, s => s.avgPct);
+    unranked.forEach(s => { s.rank = null; });
+    return ranked.concat(unranked);
+  }
+
+  all.sort((a, b) => byScore(a, b) || b.n - a.n || a.player.localeCompare(b.player));
+  assignRanks(all, s => s.avg);
+  return all;
 }
 
 /* Global board: sum of per-game ranks, lower is better. A player who
@@ -276,10 +321,13 @@ function globalBoard() {
   const perGame = new Map();
   for (const g of GAMES) {
     const stats = statsFor(g.id);
+    // Unranked players (entries but no percentile where percentile ranks) fall
+    // through to the same last-place + 1 treatment as never having played.
+    const ranked = stats.filter(s => s.rank !== null);
     perGame.set(g.id, {
       stats,
-      ranks: new Map(stats.map(s => [s.player, s.rank])),
-      count: stats.length,
+      ranks: new Map(ranked.map(s => [s.player, s.rank])),
+      count: ranked.length,
     });
   }
 
@@ -317,11 +365,15 @@ function globalBoard() {
    not readable from the CDN until that build finishes (~30s). After a write
    succeeds, mirror it into STATE instead of refetching a file we know is
    stale — these mirror the server's own upsert semantics. */
-function applyScoreLocally(game, player, date, score) {
+function applyScoreLocally(game, player, date, score, pct = null) {
   const row = STATE.scores.find(r =>
     r.game === game && r.player === player && r.date === date);
-  if (row) row.score = score;
-  else STATE.scores.push({ date, game, player, score });
+  if (row) {
+    row.score = score;
+    if (pct !== null) row.pct = pct;   // blank leaves the stored one alone
+  } else {
+    STATE.scores.push({ date, game, player, score, pct });
+  }
 }
 
 function removeScoreLocally(game, player, date) {
@@ -429,11 +481,15 @@ function renderGame(g) {
     <a class="play" href="${g.url}" target="_blank" rel="noopener">Play</a>
   </div>`;
 
+  const pctGame = g.rankBy === 'percentile';
+  const topStat = pctGame
+    ? { v: leader && leader.avgPct !== null ? ordinal(leader.avgPct) : '—', k: 'Top %ile' }
+    : { v: leader ? g.fmtAvg(leader.avg) : '—', k: 'Best avg' };
+
   h += `<div class="stat-row">
     <div class="stat"><div class="v">${stats.length}</div><div class="k">Players</div></div>
     <div class="stat"><div class="v">${entries.length}</div><div class="k">Scores</div></div>
-    <div class="stat"><div class="v">${leader ? g.fmtAvg(leader.avg) : '—'}</div>
-      <div class="k">Best avg</div></div>
+    <div class="stat"><div class="v">${topStat.v}</div><div class="k">${topStat.k}</div></div>
   </div>`;
 
   h += `<button class="btn" id="logToggle">Log a score</button>
@@ -458,6 +514,13 @@ function renderGame(g) {
             step="${g.step}" placeholder="${g.placeholder || ''}">
         </div>` : ''}
       </div>
+      ${g.percentile ? `
+      <div class="field">
+        <label for="fPct">Percentile
+          <span class="label-hint">&mdash; the % of players you beat${
+            g.percentileRequired ? ', which is what ranks this game' : ' · optional'}</span></label>
+        <input type="number" id="fPct" min="0" max="100" step="0.1" placeholder="88">
+      </div>` : ''}
       ${g.input === 'attempts' ? `
       <div class="field">
         <label for="fScore">${escapeHtml(g.inputLabel)}
@@ -477,7 +540,9 @@ function renderGame(g) {
       <div class="status" id="fStatus"></div>
     </div>`;
 
-  h += `<h2>Leaderboard <span class="hint">ranked by average score</span></h2>`;
+  h += `<h2>Leaderboard <span class="hint">${pctGame
+    ? 'ranked by average percentile &mdash; levels out how hard each day was'
+    : 'ranked by average score'}</span></h2>`;
   if (!stats.length) {
     h += `<div class="card"><div class="empty">
       Nobody has logged a ${escapeHtml(g.name)} score yet.
@@ -486,13 +551,19 @@ function renderGame(g) {
     h += `<div class="card flush"><table>
       <thead><tr>
         <th>#</th><th class="left">Player</th>
-        <th>Avg</th><th>Best</th><th>Days</th>
+        ${pctGame ? '<th>%ile</th>' : ''}
+        <th>Avg${pctGame ? ' score' : ''}</th><th>Best</th><th>Days</th>
       </tr></thead><tbody>`;
     for (const s of stats) {
-      h += `<tr class="top-${s.rank}">
-        <td class="rank">${s.rank}</td>
+      const unranked = s.rank === null;
+      h += `<tr class="top-${unranked ? 0 : s.rank}">
+        <td class="rank">${unranked ? '&mdash;' : s.rank}</td>
         <td class="player left">${escapeHtml(s.player)}</td>
-        <td class="score">${g.fmtAvg(s.avg)}</td>
+        ${pctGame ? `<td class="score">${s.avgPct === null
+          ? '<span class="pill absent" title="no percentile recorded — unranked">&mdash;</span>'
+          : `<span title="${s.avgPct.toFixed(1)} across ${s.pctN} day${s.pctN === 1 ? '' : 's'}"
+             >${ordinal(s.avgPct)}</span>`}</td>` : ''}
+        <td class="${pctGame ? 'dim' : 'score'}">${g.fmtAvg(s.avg)}</td>
         <td class="dim">${g.fmtRaw(s.best)}</td>
         <td class="dim">${s.n}</td>
       </tr>`;
@@ -555,11 +626,19 @@ function wireGameForm(g, players) {
   if (!players.length) { sel.value = '__new__'; syncNew(); }
 
   const scoreEl = document.getElementById('fScore');
+  const pctEl = document.getElementById('fPct');
   const readout = document.getElementById('fReadout');
   const showReadout = () => {
+    const parts = [];
     const v = parseFloat(scoreEl.value);
-    readout.textContent = Number.isNaN(v) ? '' : (g.readout ? g.readout(v) : '');
+    if (!Number.isNaN(v) && g.readout) parts.push(g.readout(v));
+    if (pctEl) {
+      const p = parseFloat(pctEl.value);
+      if (!Number.isNaN(p)) parts.push(`${ordinal(p)} percentile`);
+    }
+    readout.textContent = parts.join(' · ');
   };
+  if (pctEl) pctEl.oninput = showReadout;
 
   if (g.input === 'attempts') {
     const box = document.getElementById('fAttempts');
@@ -595,39 +674,62 @@ function renderHistory(g, player) {
     return;
   }
 
+  const pctGame = g.rankBy === 'percentile';
   const isBetter = (a, b) => (g.dir === 'high' ? a > b : a < b);
   const vals = entries.map(e => e.score);
   const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
   const best = vals.reduce((m, v) => (isBetter(v, m) ? v : m), vals[0]);
+  const hasPct = e => e.pct !== null && e.pct !== undefined;
+  const pctVals = entries.filter(hasPct).map(e => e.pct);
+  const avgPct = pctVals.length
+    ? pctVals.reduce((a, b) => a + b, 0) / pctVals.length : null;
 
-  let h = `<div class="stat-row">
-    <div class="stat"><div class="v">${g.fmtAvg(avg)}</div><div class="k">Average</div></div>
-    <div class="stat"><div class="v">${g.fmtRaw(best)}</div><div class="k">Best</div></div>
-    <div class="stat"><div class="v">${entries.length}</div><div class="k">Days</div></div>
-  </div>`;
+  let h = `<div class="stat-row">`;
+  if (pctGame) {
+    h += `<div class="stat"><div class="v">${avgPct === null ? '&mdash;' : ordinal(avgPct)}</div>
+        <div class="k">Avg %ile</div></div>
+      <div class="stat"><div class="v">${g.fmtAvg(avg)}</div><div class="k">Avg score</div></div>`;
+  } else {
+    h += `<div class="stat"><div class="v">${g.fmtAvg(avg)}</div><div class="k">Average</div></div>
+      <div class="stat"><div class="v">${g.fmtRaw(best)}</div><div class="k">Best</div></div>`;
+  }
+  h += `<div class="stat"><div class="v">${entries.length}</div><div class="k">Days</div></div></div>`;
 
   h += sparkline(g, entries);
   h += `<div class="spark-axis">
     <span>${prettyDate(entries[0].date)}</span>
-    <span>better is taller</span>
+    <span>${pctGame ? 'percentile · taller is better' : 'better is taller'}</span>
     <span>${prettyDate(entries[entries.length - 1].date)}</span>
   </div>`;
 
+  // "vs. avg" compares whatever metric ranks this game.
+  const refAvg = pctGame ? avgPct : avg;
+  const eps = pctGame ? 0.05 : 0.005;
+
   h += `<table><thead><tr>
-      <th class="left">Date</th><th>Score</th><th>vs. avg</th>
+      <th class="left">Date</th><th>Score</th>${pctGame ? '<th>%ile</th>' : ''}<th>vs. avg</th>
     </tr></thead><tbody>`;
   for (const e of [...entries].reverse()) {
-    const diff = e.score - avg;
-    const good = g.dir === 'high' ? diff > 0 : diff < 0;
-    const sign = diff > 0 ? '+' : '';
-    const col = Math.abs(diff) < 0.005 ? 'var(--faint)' : (good ? 'var(--good)' : 'var(--bad)');
+    const metric = pctGame ? (hasPct(e) ? e.pct : null) : e.score;
+    let diffCell;
+    if (metric === null || refAvg === null) {
+      diffCell = `<td class="dim">&mdash;</td>`;
+    } else {
+      const diff = metric - refAvg;
+      const good = pctGame ? diff > 0 : (g.dir === 'high' ? diff > 0 : diff < 0);
+      const col = Math.abs(diff) < eps ? 'var(--faint)' : (good ? 'var(--good)' : 'var(--bad)');
+      diffCell = `<td style="color:${col}">${Math.abs(diff) < eps
+        ? '&mdash;' : (diff > 0 ? '+' : '') + diff.toFixed(1)}</td>`;
+    }
     h += `<tr>
       <td class="left dim">${escapeHtml(e.date)}</td>
-      <td class="score">${g.fmtRaw(e.score)}<button class="btn-x"
-        title="Delete this score"
+      <td class="${pctGame ? 'dim' : 'score'}">${g.fmtRaw(e.score)}</td>
+      ${pctGame ? `<td class="score">${hasPct(e)
+        ? ordinal(e.pct)
+        : '<span class="pill absent" title="no percentile recorded">&mdash;</span>'}</td>` : ''}
+      ${diffCell.replace('</td>', `<button class="btn-x" title="Delete this score"
         onclick="promptDelete('${escapeHtml(e.date)}','${g.id}','${escapeHtml(e.player)}')"
-        >&times;</button></td>
-      <td style="color:${col}">${Math.abs(diff) < 0.005 ? '—' : sign + diff.toFixed(1)}</td>
+        >&times;</button></td>`)}
     </tr>`;
   }
   h += `</tbody></table>`;
@@ -635,24 +737,43 @@ function renderHistory(g, player) {
 }
 
 /* Bars, not a line: "taller is better" holds for both directions once
-   low-is-better games are inverted. */
+   low-is-better games are inverted. Percentile-ranked games plot the
+   percentile instead of the score, on a fixed 0–100 scale, since that is the
+   figure their standings actually turn on. */
 function sparkline(g, entries) {
   const W = 600, H = 90, pad = 4;
   const n = entries.length;
   const slot = W / n;
   const bw = Math.max(2, Math.min(34, slot * 0.62));
-  const span = g.max - g.min || 1;
+  const pctGame = g.rankBy === 'percentile';
+  const lo = pctGame ? 0 : g.min;
+  const span = (pctGame ? 100 : g.max) - lo || 1;
 
   const bars = entries.map((e, i) => {
-    let norm = (e.score - g.min) / span;
-    if (g.dir === 'low') norm = 1 - norm;
+    const raw = pctGame
+      ? (e.pct === null || e.pct === undefined ? null : e.pct)
+      : e.score;
+    const x = i * slot + (slot - bw) / 2;
+
+    if (raw === null) {
+      // No percentile on this day — keep the slot so the gap is visible.
+      return `<rect x="${x.toFixed(2)}" y="${(H - pad - 6).toFixed(2)}"
+        width="${bw.toFixed(2)}" height="6" rx="2" fill="none"
+        stroke="${g.accent}" stroke-dasharray="2 2" opacity="0.4"
+        ><title>${escapeHtml(e.date)}: ${escapeHtml(g.fmtRaw(e.score))} — no percentile</title></rect>`;
+    }
+
+    let norm = (raw - lo) / span;
+    if (!pctGame && g.dir === 'low') norm = 1 - norm;
     norm = Math.max(0, Math.min(1, norm));
     const bh = Math.max(2, norm * (H - pad * 2));
-    const x = i * slot + (slot - bw) / 2;
     const y = H - pad - bh;
+    const label = pctGame
+      ? `${ordinal(raw)} · ${g.fmtRaw(e.score)}`
+      : g.fmtRaw(e.score);
     return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}"
       height="${bh.toFixed(2)}" rx="2" fill="${g.accent}" opacity="${0.45 + norm * 0.55}"
-      ><title>${escapeHtml(e.date)}: ${escapeHtml(g.fmtRaw(e.score))}</title></rect>`;
+      ><title>${escapeHtml(e.date)}: ${escapeHtml(label)}</title></rect>`;
   }).join('');
 
   return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
@@ -745,6 +866,22 @@ async function submitScore(g) {
     return fail(`Score must be between ${g.min} and ${g.max}.`);
   }
 
+  const pctEl = document.getElementById('fPct');
+  let pct = null;
+  if (pctEl) {
+    const rawPct = pctEl.value.trim();
+    if (rawPct === '') {
+      if (g.percentileRequired) {
+        return fail(`Enter the percentile — it’s what ranks ${g.name}.`);
+      }
+    } else {
+      pct = parseFloat(rawPct);
+      if (Number.isNaN(pct) || pct < 0 || pct > 100) {
+        return fail('Percentile must be between 0 and 100.');
+      }
+    }
+  }
+
   btn.disabled = true;
   statusEl.className = 'status';
   statusEl.textContent = 'Saving…';
@@ -753,14 +890,14 @@ async function submitScore(g) {
     const res = await fetch('/api/add-score', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, game: g.id, player, score }),
+      body: JSON.stringify({ date, game: g.id, player, score, percentile: pct }),
     });
     const out = await res.json();
     if (!res.ok || !out.ok) throw new Error(out.error || `HTTP ${res.status}`);
 
     const name = out.player || player;
     localStorage.setItem(LS_NAME, name);
-    applyScoreLocally(g.id, name, date, score);
+    applyScoreLocally(g.id, name, date, score, pct);
     statusEl.className = 'status ok';
     statusEl.textContent = (out.updated
       ? `Updated ${name}’s score for ${prettyDate(date)}.`

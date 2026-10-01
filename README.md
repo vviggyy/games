@@ -17,25 +17,45 @@ Same shape as [chiptrack](https://chiptrack.viggy.me), same visual language as
 
 ## The games
 
-| Game | Score | Range | Better |
-|---|---|---|---|
-| [Krillion](https://www.krillion.org/) | seven rounds, rarity-tiered 10–100 each | 0–700 | higher |
-| [Wordle](https://www.nytimes.com/games/wordle/index.html) | guesses used (a miss counts as 7) | 1–7 | **lower** |
-| [dialed.gg color](https://dialed.gg/color) | five colors, CIELAB distance, 10 each | 0–50 | higher |
-| [dialed.gg sound](https://dialed.gg/sound) | five tones, ERB scale, 10 each | 0–50 | higher |
+| Game | Score | Range | Better | Ranked on |
+|---|---|---|---|---|
+| [Krillion](https://www.krillion.org/) | seven rounds, rarity-tiered 10–100 each | 0–700 | higher | **percentile** |
+| [Wordle](https://www.nytimes.com/games/wordle/index.html) | guesses used (a miss counts as 7) | 1–7 | **lower** | score |
+| [dialed.gg color](https://dialed.gg/color) | five colors, CIELAB distance, 10 each | 0–50 | higher | score |
+| [dialed.gg sound](https://dialed.gg/sound) | five tones, ERB scale, 10 each | 0–50 | higher | score |
 
 Each game's score input is tailored to it: Wordle gives you a 1–6–X tap row, Krillion a 0–700 box
-that live-converts your score into dive depth, the dialed games a 0–50 box that shows your percentage
-of perfect.
+that live-converts your score into dive depth plus a **required percentile** box, the dialed games a
+0–50 box that shows your percentage of perfect.
 
 ---
 
 ## How the ranking works
 
-**Within a game**, players are ranked by their **average score** across every day they logged. Average
+**Within a game**, players are ranked by their **average** across every day they logged. Average
 rather than total, so somebody who plays twenty days isn't automatically ahead of somebody who plays
 two; average rather than personal best, so one lucky day doesn't define you. Ties share a rank and the
 next rank skips — 1, 2, 2, 4.
+
+**Krillion is ranked on average percentile, not average score.** Krillion's difficulty swings a lot
+day to day, so a raw score isn't comparable across days — averaging it partly measures *which days you
+showed up for* rather than how well you played. The percentile Krillion reports is already normalised
+against that day's field, which is exactly the correction needed, so it ranks and the score rides
+along as a displayed stat and the tiebreak.
+
+The two are deliberately **not** combined. Percentile is derived from where your score landed in that
+day's field, so within a day it's a monotone transform of the score — they aren't independent signals.
+Adding them would double-weight the same thing and drag the day-difficulty bias back into a measure
+chosen to remove it.
+
+Because the global board sums *ranks* rather than scores, each game is free to rank on whatever metric
+suits it without disturbing the global math. That's what makes this a one-line config change rather
+than an architectural one.
+
+Percentile is **required** when logging a Krillion score, since you can't be ranked on a figure you
+didn't enter. A Krillion entry that somehow has no percentile still counts toward the score stats but
+shows as unranked (`—`), and for the global sum that player is treated the same as never having played
+the game.
 
 **Globally**, you get your rank in each of the four games and those ranks are **summed. Lowest total
 wins.** Raw scores can't be added together — 385 at Krillion and 4 at Wordle aren't on the same scale,
@@ -90,14 +110,19 @@ signed. Posts commit to `suggestions.json`.
 `scores.csv` — one row per person per game per day:
 
 ```csv
-date,game,player,score
-2026-09-28,wordle,Viggy,4
-2026-09-28,krillion,Jai,500
+date,game,player,score,percentile
+2026-09-28,wordle,Viggy,4,
+2026-09-28,krillion,Jai,500,88
 ```
 
 `game` is one of `krillion`, `wordle`, `dialed_color`, `dialed_sound`. Rows naming a game the site no
 longer tracks are ignored on load rather than erroring, so a game can be retired without rewriting
 history.
+
+`percentile` is blank for every game except Krillion. A CSV still using the original four-column
+header is read fine and gains the column the next time anything is written. Re-submitting a score with
+the percentile box left blank updates the score and leaves the stored percentile alone, so fixing a
+typo in one field doesn't wipe the other.
 
 `suggestions.json` — `[{id, name, text, ts}]`.
 
@@ -146,6 +171,11 @@ Everything game-specific lives in one place — the `GAMES` array at the top of 
 accent color, then add the same `id` and range to `GAME_RANGES` in `api/add-score.py` so the server
 validates it too. The nav, the global leaderboard column, the game page, and the history chart all
 derive from that entry; nothing else needs touching.
+
+To give a game a percentile, set `percentile: true` on it and add its `id` to `PERCENTILE_GAMES` in
+`api/add-score.py`. Adding `rankBy: 'percentile'` makes it rank on that instead of score (which also
+switches the history chart to plot percentile), and `percentileRequired: true` enforces it at the form.
+Omit `rankBy` to record a percentile for display only.
 
 ## Local development
 

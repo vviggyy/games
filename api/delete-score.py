@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler
 REPO = "vviggyy/games"
 CSV_PATH = "scores.csv"
 BRANCH = "main"
-HEADER = ["date", "game", "player", "score"]
+HEADER = ["date", "game", "player", "score", "percentile"]
 
 
 def github_request(path, method="GET", body=None, token=None):
@@ -86,7 +86,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=HEADER, lineterminator="\n")
+        writer = csv.DictWriter(buf, fieldnames=HEADER, lineterminator="\n", restval="")
         writer.writeheader()
         writer.writerows(kept)
 
