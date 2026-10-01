@@ -427,7 +427,7 @@ function renderHome() {
       No scores logged yet.<br>Pick a game below and be the first.
     </div></div>`;
   } else {
-    h += `<div class="card flush"><table>
+    h += `<div class="card flush"><div class="table-wrap"><table>
       <thead><tr>
         <th>#</th><th class="left">Player</th>
         ${GAMES.map(g => `<th title="${escapeHtml(g.name)}">${escapeHtml(g.nav)}</th>`).join('')}
@@ -443,7 +443,7 @@ function renderHome() {
         <td class="score">${r.total}</td>
       </tr>`;
     }
-    h += `</tbody></table></div>`;
+    h += `</tbody></table></div></div>`;
   }
 
   h += `<h2>Games</h2><div class="game-grid">`;
@@ -548,7 +548,7 @@ function renderGame(g) {
       Nobody has logged a ${escapeHtml(g.name)} score yet.
     </div></div>`;
   } else {
-    h += `<div class="card flush"><table>
+    h += `<div class="card flush"><div class="table-wrap"><table>
       <thead><tr>
         <th>#</th><th class="left">Player</th>
         ${pctGame ? '<th>%ile</th>' : ''}
@@ -568,7 +568,7 @@ function renderGame(g) {
         <td class="dim">${s.n}</td>
       </tr>`;
     }
-    h += `</tbody></table></div>`;
+    h += `</tbody></table></div></div>`;
   }
 
   h += `<h2>Player history</h2>`;
@@ -706,7 +706,7 @@ function renderHistory(g, player) {
   const refAvg = pctGame ? avgPct : avg;
   const eps = pctGame ? 0.05 : 0.005;
 
-  h += `<table><thead><tr>
+  h += `<div class="table-wrap"><table><thead><tr>
       <th class="left">Date</th><th>Score</th>${pctGame ? '<th>%ile</th>' : ''}<th>vs. avg</th>
     </tr></thead><tbody>`;
   for (const e of [...entries].reverse()) {
@@ -732,7 +732,7 @@ function renderHistory(g, player) {
         >&times;</button></td>`)}
     </tr>`;
   }
-  h += `</tbody></table>`;
+  h += `</tbody></table></div>`;
   body.innerHTML = h;
 }
 

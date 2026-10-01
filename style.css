@@ -195,9 +195,34 @@ h2 .hint {
   text-transform: uppercase;
   color: var(--tile-accent);
   margin-top: 0.7rem;
+  /* A long player name must not push past the tile edge. */
+  overflow-wrap: anywhere;
+}
+
+.game-tile .tile-name,
+td.player {
+  overflow-wrap: anywhere;
 }
 
 /* ---------- Tables ---------- */
+
+/* Seven columns do not fit a phone, and the header labels are nowrap, so the
+   table has a min-width wider than the card. Let it scroll inside its own box
+   rather than bleeding past the card's rounded edge. */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  border-radius: inherit;
+}
+
+/* Thin, unobtrusive scrollbar where the platform shows one. */
+.table-wrap::-webkit-scrollbar { height: 6px; }
+.table-wrap::-webkit-scrollbar-track { background: transparent; }
+.table-wrap::-webkit-scrollbar-thumb {
+  background: rgba(35, 33, 46, 0.16);
+  border-radius: 3px;
+}
 
 table {
   width: 100%;
@@ -670,5 +695,34 @@ tbody tr:hover td .btn-x {
   .game-head h1 { font-size: 1.6rem; }
   .container { padding: 1.5rem 1rem 3rem; }
   table { font-size: 0.8rem; }
-  tbody td, thead th { padding: 0.5rem 0.4rem; }
+  tbody td, thead th { padding: 0.5rem 0.35rem; }
+  td.rank { width: 1.9rem; }
+
+  /* Ragged wrapping left "Suggestions" orphaned on its own row. A 3-column
+     grid lays the six items out as an even 3x2 with fat tap targets. */
+  .nav {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.4rem;
+  }
+
+  .nav a {
+    font-size: 0.72rem;
+    padding: 0.55rem 0.3rem;
+    text-align: center;
+    border-radius: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* The delete × is hover-revealed, which never happens on touch. */
+  td .btn-x { opacity: 0.45; }
+
+  .stat-row { gap: 0.5rem; }
+  .stat { padding: 0.6rem 0.4rem; }
+  .stat .v { font-size: 1.3rem; }
+  .stat .k { font-size: 0.58rem; letter-spacing: 0.04em; }
+
+  .game-head { gap: 0.6rem; }
+  .game-head .tag { font-size: 0.72rem; }
 }
