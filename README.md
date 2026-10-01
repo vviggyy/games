@@ -120,6 +120,25 @@ The site is static; only the three `api/*.py` functions need a runtime, declared
 Scores are read client-side straight from the CSV on the deployed site, so a fresh deploy is live the
 moment DNS resolves.
 
+### Every score triggers a deploy — on purpose
+
+Submitting a score commits to `main`, and that commit triggers a Vercel build. **This is not
+incidental; it is the publish step.** Vercel serves `scores.csv` from the last *built* deployment, not
+from GitHub, so the new row is not readable by anybody else until that build finishes (~30 seconds).
+
+Two consequences worth knowing:
+
+- **Do not add an Ignored Build Step** to skip builds for score commits. It looks like an easy way to
+  cut deploy churn, and it would silently freeze the leaderboard at whatever the last real build
+  contained — the commits would keep landing in git and never reach the site.
+- **The person submitting sees their score immediately anyway.** The client mirrors its own write into
+  local state rather than refetching a CSV it knows is stale for the next half-minute; otherwise your
+  score would appear, then vanish on the re-render. Everyone else sees it after the build.
+
+Vercel's Hobby plan allows [100 deployments per day](https://vercel.com/docs/limits). Four games times
+a handful of friends is comfortably inside that, but it is the limit to watch if the group or the game
+list grows a lot.
+
 ## Adding a game
 
 Everything game-specific lives in one place — the `GAMES` array at the top of the `<script>` in
